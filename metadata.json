@@ -1,0 +1,5 @@
+{
+  "name": "Remix: Spectrum Studio v1.0.5",
+  "description": "GIF, 스펙트럼수정 버전 A browser-based, client-side video creator for YouTube playlists featuring audio visualization, background effects, and local rendering without external APIs.",
+  "requestFramePermissions": []
+}
