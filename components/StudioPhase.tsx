@@ -103,7 +103,10 @@ const PALETTE_COLORS = [
   '#00FFFF', '#000000', '#808080'
 ];
 
+// Caches
 let sharedAudioContext: AudioContext | null = null;
+let sharedAnalyser: AnalyserNode | null = null;
+let sharedGain: GainNode | null = null;
 const mediaElementSourceCache = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
 
 export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlaylist, onBack, initialImages, encodingSettings }) => {
@@ -151,6 +154,15 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
     if (!sharedAudioContext) {
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       sharedAudioContext = new AudioContext();
+      
+      sharedAnalyser = sharedAudioContext.createAnalyser();
+      sharedAnalyser.fftSize = 2048;
+      
+      sharedGain = sharedAudioContext.createGain();
+      sharedGain.gain.value = 1.0;
+      
+      sharedAnalyser.connect(sharedGain);
+      sharedGain.connect(sharedAudioContext.destination);
     }
     audioContextRef.current = sharedAudioContext;
   };
@@ -159,48 +171,26 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
   useEffect(() => {
     handleAudioInit();
     
-    if (audioRef.current && audioContextRef.current && !sourceNodeRef.current) {
+    if (audioRef.current && sharedAudioContext && sharedAnalyser && sharedGain && !sourceNodeRef.current) {
       try {
-        const ctx = audioContextRef.current;
-        
         let source = mediaElementSourceCache.get(audioRef.current);
         if (!source) {
-          source = ctx.createMediaElementSource(audioRef.current);
+          source = sharedAudioContext.createMediaElementSource(audioRef.current);
+          source.connect(sharedAnalyser);
           mediaElementSourceCache.set(audioRef.current, source);
-        } else {
-          // If reusing, disconnect from previous graph just in case
-          source.disconnect();
         }
         
         sourceNodeRef.current = source;
-        
-        // 1. Analyser (Shared)
-        const ana = ctx.createAnalyser();
-        ana.fftSize = 2048;
-        source.connect(ana);
-        setAnalyser(ana);
-        
-        // 2. Speaker Output (via GainNode for Muting)
-        const gain = ctx.createGain();
-        gain.gain.value = 1.0; // Default Unmuted
-        ana.connect(gain);
-        gain.connect(ctx.destination);
-        gainNodeRef.current = gain;
+        setAnalyser(sharedAnalyser);
+        gainNodeRef.current = sharedGain;
 
       } catch (e) { console.error("Audio graph error", e); }
     }
 
     return () => { 
-      // We do NOT close the sharedAudioContext here to avoid Strict Mode issues.
-      // We only disconnect the nodes if needed, but garbage collection handles it.
-      if (sourceNodeRef.current) {
-        sourceNodeRef.current.disconnect();
-        sourceNodeRef.current = null;
-      }
-      if (gainNodeRef.current) {
-        gainNodeRef.current.disconnect();
-        gainNodeRef.current = null;
-      }
+      // Do NOT disconnect anything shared.
+      sourceNodeRef.current = null;
+      gainNodeRef.current = null;
       setAnalyser(null);
     };
   }, []);
@@ -323,6 +313,7 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
 
     let muxerTarget: any;
     let fileHandle: any = null;
+    let writableStream: any = null;
     let currentMode: "filesystem" | "blob" = "blob";
     
     // Virtual File System (Chunks) for Blob fallback
@@ -339,8 +330,8 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
                     suggestedName: `${renderFilename}.mp4`,
                     types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }],
                 });
-                const writable = await fileHandle.createWritable();
-                muxerTarget = new FileSystemWritableFileStreamTarget(writable);
+                writableStream = await fileHandle.createWritable();
+                muxerTarget = new FileSystemWritableFileStreamTarget(writableStream);
                 currentMode = "filesystem";
             } catch (err: any) {
                 if (err.name === 'AbortError') { setIsRendering(false); return; }
@@ -649,6 +640,10 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
         await audioEncoder.flush();
         muxer.finalize();
         
+        if (writableStream) {
+            await writableStream.close();
+        }
+        
         // Handle Blob Download if we used the manual buffer
         if (currentMode === 'blob' && fileChunks.length > 0) {
             setRenderStatusText("다운로드 준비 중...");
@@ -673,6 +668,9 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
 
     } catch (e: any) {
         console.error("Rendering failed:", e);
+        if (writableStream) {
+            try { await writableStream.abort(); } catch (abortErr) { console.error("Could not abort stream:", abortErr); }
+        }
         alert(`❌ 렌더링 오류: ${e.message}`);
         setIsRendering(false);
     }
@@ -1327,6 +1325,7 @@ export const StudioPhase: React.FC<StudioPhaseProps> = ({ playlist: initialPlayl
       {/* Hidden Audio */}
       <audio 
         ref={audioRef}
+        crossOrigin="anonymous"
         onEnded={handleTrackEnd}
         onTimeUpdate={handleTimeUpdate}
       />
